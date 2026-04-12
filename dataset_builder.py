@@ -7,10 +7,6 @@ as a clean local dataset ready for the retrieval pipeline.
 Each query is also tagged with is_climate=True/False so that
 main.py can run a domain analysis subsection automatically.
 
-Run once before main.py:
-    python dataset_builder.py                        # default 10k queries
-    python dataset_builder.py --max-queries 100000   # full dataset
-
 Output files (saved to data/):
     ms_marco_passages.json   — all passage records
     ms_marco_queries.json    — all query records (with is_climate flag)
@@ -48,6 +44,8 @@ CLIMATE_KEYWORDS = [
 ]
 
 _CLIMATE_RE = re.compile(
+    # re.escape ensures keywords with special regex chars (e.g. "+") are treated literally.
+    # "|".join builds a single OR-pattern so the entire list is matched in one pass.
     "|".join(re.escape(kw) for kw in CLIMATE_KEYWORDS),
     re.IGNORECASE,
 )
@@ -97,7 +95,7 @@ def build_dataset(
         "microsoft/ms_marco",
         "v1.1",
         split=split,
-        streaming=True,
+        streaming=True,   # streaming=True avoids downloading the full dataset upfront
     )
 
     # ------------------------------------------------------------------
@@ -129,26 +127,27 @@ def build_dataset(
     # ------------------------------------------------------------------
     queries:  List[Dict] = []
     passages: List[Dict] = []
-    passage_id = 0
+    passage_id = 0   # global counter across all passages — ensures unique passage IDs
     n_climate  = 0
 
     for example in reservoir:
         query_text = example["query"]
-        query_id   = f"q_{example['query_id']}"
+        query_id   = f"q_{example['query_id']}"   # "q_" prefix avoids ID collisions with passage IDs ("p_...")
         climate    = is_climate_query(query_text)
         if climate:
             n_climate += 1
 
+        # MS MARCO stores passages as a dict-of-lists (columnar) rather than a list-of-dicts
         p_data    = example["passages"]
-        texts     = p_data["passage_text"]
-        selected  = p_data["is_selected"]
-        urls      = p_data["url"]
+        texts     = p_data["passage_text"]   # list[str]
+        selected  = p_data["is_selected"]    # list[int] — 1 = relevant, 0 = not relevant
+        urls      = p_data["url"]            # list[str]
 
         # Skip if no relevant passage (rare edge case in MS MARCO)
         if sum(selected) == 0:
             continue
 
-        relevance = {}
+        relevance = {}   # ground-truth map: {passage_id → relevance_label} used by main.py for evaluation
         for text, rel, url in zip(texts, selected, urls):
             pid = f"p_{passage_id}"
             passages.append({

@@ -5,6 +5,7 @@ __pycache__/
 *.npy
 *.pkl
 *.index
+*.ppt
 .env
 *.egg-info/
 dist/

@@ -1,0 +1,11 @@
+data/
+results/
+__pycache__/
+*.pyc
+*.npy
+*.pkl
+*.index
+.env
+*.egg-info/
+dist/
+.DS_Store

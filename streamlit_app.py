@@ -90,85 +90,64 @@ except Exception:
     ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # ---------------------------------------------------------------
-# Cloud setup — download MS MARCO sample if data files missing
+# Cloud setup — download pre-built data files from HuggingFace
 # ---------------------------------------------------------------
 def build_dataset_if_missing(config):
-    passages_path = config["data"]["ms_marco_passages_path"]
-    queries_path  = config["data"]["ms_marco_queries_path"]
+    passages_path  = config["data"]["ms_marco_passages_path"]
+    queries_path   = config["data"]["ms_marco_queries_path"]
+    embeddings_path = config["data"]["embeddings_path"]
+    faiss_path     = config["data"]["faiss_index_path"]
+    bm25_path      = config["data"]["index_path"]
 
-    if Path(passages_path).exists() and Path(queries_path).exists():
+    files_needed = {
+        "ms_marco_passages.json": passages_path,
+        "ms_marco_queries.json":  queries_path,
+        "doc_embeddings.npy":     embeddings_path,
+        "faiss_hnsw.index":       faiss_path,
+        "bm25_index.pkl":         bm25_path,
+    }
+
+    all_present = all(Path(p).exists() for p in files_needed.values())
+    if all_present:
         return True
 
     try:
-        from datasets import load_dataset
+        from huggingface_hub import hf_hub_download
     except ImportError:
         return False
 
+    # Get HF token from Streamlit secrets or env
+    try:
+        hf_token = st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        hf_token = os.environ.get("HF_TOKEN", "")
+
     Path(passages_path).parent.mkdir(parents=True, exist_ok=True)
 
-    CLIMATE_KEYWORDS = [
-        "climate", "carbon", "emission", "renewable", "solar", "wind",
-        "fossil", "greenhouse", "warming", "energy", "temperature",
-        "drought", "flood", "arctic", "methane", "deforestation",
-    ]
+    total = sum(1 for p in files_needed.values() if not Path(p).exists())
+    done  = 0
+    progress = st.progress(0, text="Downloading search indexes...")
 
-    dataset = load_dataset(
-        "ms_marco", "v1.1", split="train",
-        streaming=True, trust_remote_code=True,
-    )
-
-    passages, queries = [], []
-    seen_pids = set()
-    MAX_QUERIES = 1000
-
-    progress = st.progress(0, text="Setting up search index for the first time...")
-
-    for item in dataset:
-        if len(queries) >= MAX_QUERIES:
-            break
-
-        query_id   = str(item["query_id"])
-        query_text = item["query"]
-        pas_list   = item["passages"]["passage_text"]
-        sel_list   = item["passages"]["is_selected"]
-        url_list   = item["passages"]["url"]
-
-        if sum(sel_list) == 0:
+    for filename, local_path in files_needed.items():
+        if Path(local_path).exists():
             continue
-
-        is_climate = any(kw in query_text.lower() for kw in CLIMATE_KEYWORDS)
-        relevance  = {}
-
-        for pas, sel, url in zip(pas_list, sel_list, url_list):
-            pid = f"p_{len(passages)}"
-            if pid not in seen_pids:
-                seen_pids.add(pid)
-                passages.append({
-                    "passage_id":   pid,
-                    "passage_text": pas,
-                    "query_id":     query_id,
-                    "is_selected":  int(sel),
-                    "url":          url,
-                    "is_climate":   is_climate,
-                })
-            relevance[pid] = int(sel)
-
-        queries.append({
-            "query_id":   query_id,
-            "query":      query_text,
-            "is_climate": is_climate,
-            "relevance":  relevance,
-        })
-
-        progress.progress(
-            len(queries) / MAX_QUERIES,
-            text=f"Building index... {len(queries)}/{MAX_QUERIES}"
-        )
-
-    with open(passages_path, "w") as f:
-        json.dump(passages, f)
-    with open(queries_path, "w") as f:
-        json.dump(queries, f)
+        try:
+            downloaded = hf_hub_download(
+                repo_id="AshishSiwach/querylens-data",
+                filename=filename,
+                repo_type="dataset",
+                token=hf_token if hf_token else None,
+                local_dir=str(Path(local_path).parent),
+            )
+            # Move to exact expected path if needed
+            if str(downloaded) != str(local_path):
+                import shutil
+                shutil.move(downloaded, local_path)
+            done += 1
+            progress.progress(done / total, text=f"Downloading {filename}...")
+        except Exception as e:
+            progress.empty()
+            return False
 
     progress.empty()
     return True

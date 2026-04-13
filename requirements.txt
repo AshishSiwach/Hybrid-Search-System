@@ -10,3 +10,4 @@ seaborn>=0.12.0
 pandas>=2.0.0
 datasets
 streamlit
+huggingface_hub

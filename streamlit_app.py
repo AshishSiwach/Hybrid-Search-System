@@ -99,12 +99,9 @@ def build_dataset_if_missing(config):
     if Path(passages_path).exists() and Path(queries_path).exists():
         return True
 
-    st.info("First run: downloading MS MARCO sample from HuggingFace (~2 min)...")
-
     try:
         from datasets import load_dataset
     except ImportError:
-        st.error("Run: pip install datasets")
         return False
 
     Path(passages_path).parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +121,7 @@ def build_dataset_if_missing(config):
     seen_pids = set()
     MAX_QUERIES = 1000
 
-    progress = st.progress(0, text="Downloading passages...")
+    progress = st.progress(0, text="Setting up search index for the first time...")
 
     for item in dataset:
         if len(queries) >= MAX_QUERIES:
@@ -165,7 +162,7 @@ def build_dataset_if_missing(config):
 
         progress.progress(
             len(queries) / MAX_QUERIES,
-            text=f"Downloaded {len(queries)}/{MAX_QUERIES} queries..."
+            text=f"Building index... {len(queries)}/{MAX_QUERIES}"
         )
 
     with open(passages_path, "w") as f:
@@ -174,7 +171,6 @@ def build_dataset_if_missing(config):
         json.dump(queries, f)
 
     progress.empty()
-    st.success(f"Dataset ready: {len(passages):,} passages, {len(queries):,} queries")
     return True
 
 

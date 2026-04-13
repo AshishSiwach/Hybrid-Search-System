@@ -133,7 +133,7 @@ def build_dataset_if_missing(config):
             continue
         try:
             downloaded = hf_hub_download(
-                repo_id="AshishSiwach/querylens-data",
+                repo_id="TripleH/querylens-data",
                 filename=filename,
                 repo_type="dataset",
                 token=hf_token if hf_token else None,
@@ -147,6 +147,7 @@ def build_dataset_if_missing(config):
             progress.progress(done / total, text=f"Downloading {filename}...")
         except Exception as e:
             progress.empty()
+            st.error(f"Failed to download {filename}: {str(e)}")
             return False
 
     progress.empty()
@@ -174,7 +175,11 @@ def load_pipeline():
 
     # Build dataset on cloud if missing
     if not build_dataset_if_missing(config):
-        return None, None, None, "Dataset setup failed."
+        return None, None, None, (
+            "Dataset download failed. Check that: "
+            "(1) HuggingFace repo AshishSiwach/querylens-data exists and has all 5 files, "
+            "(2) HF_TOKEN is set in Streamlit secrets."
+        )
 
     loader = MSMarcoLoader(config)
     passages, passage_ids, metadata, queries = loader.load()

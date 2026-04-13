@@ -7,10 +7,6 @@ Run: python -m streamlit run streamlit_app.py
 
 import time, json, os, sys, urllib.request
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
-
 sys.path.insert(0, str(Path(__file__).parent))
 
 import streamlit as st
@@ -84,7 +80,7 @@ hr { border-color: #f0f0f0 !important; margin: 24px 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
 
 @st.cache_resource(show_spinner="Loading search indexes...")
 def load_pipeline():

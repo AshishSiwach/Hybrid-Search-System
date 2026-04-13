@@ -14,7 +14,7 @@ import logging
 import yaml
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
@@ -22,8 +22,6 @@ import pandas as pd
 
 from data_loader import (
     MSMarcoLoader,
-    DocumentLoader,
-    RelevanceLabeler,
     load_embeddings, save_embeddings,
     load_bm25_index, save_bm25_index,
 )
@@ -61,37 +59,16 @@ class ExperimentRunner:
         passages_path = self.config["data"]["ms_marco_passages_path"]
         queries_path  = self.config["data"]["ms_marco_queries_path"]
 
-        if Path(passages_path).exists() and Path(queries_path).exists():
-            loader = MSMarcoLoader(self.config)
-            self.passages, self.passage_ids, self.metadata, _ = loader.load()
-            self._loader = loader
-            return loader
-
-        logger.warning(
-            "MS MARCO files not found — run: python dataset_builder.py\n"
-            "Falling back to climate CSV."
-        )
-        return self._setup_from_csv()
-
-    def _setup_from_csv(self):
-        """Fallback to the original 51-doc climate CSV."""
-        csv_loader = DocumentLoader(self.config)
-        json_path  = self.config["data"]["documents_path"]
-        csv_path   = self.config["data"].get("csv_path", "")
-
-        if Path(json_path).exists():
-            self.passages, self.passage_ids, self.metadata = (
-                csv_loader.load_documents()
-            )
-        elif csv_path and Path(csv_path).exists():
-            self.passages, self.passage_ids, self.metadata = (
-                csv_loader.load_from_csv(save_json=True)
-            )
-        else:
+        if not Path(passages_path).exists() or not Path(queries_path).exists():
             raise FileNotFoundError(
-                "No data found. Run dataset_builder.py or provide the climate CSV."
+                "MS MARCO dataset not found.\n"
+                "Run: python dataset_builder.py"
             )
-        return None
+
+        loader = MSMarcoLoader(self.config)
+        self.passages, self.passage_ids, self.metadata, _ = loader.load()
+        self._loader = loader
+        return loader
 
     # ------------------------------------------------------------------
     # Retriever construction
@@ -291,10 +268,6 @@ class ExperimentRunner:
                 print(f"{scores[m]:>12.4f}", end="")
             print()
         print("=" * 80 + "\n")
-
-
-# Fix missing Optional import used in save_results signature
-from typing import Optional
 
 
 def main():

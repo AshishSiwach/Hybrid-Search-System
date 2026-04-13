@@ -15,7 +15,8 @@ Usage:
     python demo.py --query "sea level rise" --no-generate   # skip generation
 
 Setup:
-    export ANTHROPIC_API_KEY="your-key-here"
+    Add your key to the .env file:
+        ANTHROPIC_API_KEY=your-key-here
     python demo.py
 """
 
@@ -28,6 +29,9 @@ import urllib.request
 import urllib.error
 import yaml
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.WARNING)
 
@@ -42,7 +46,7 @@ def load_config(path: str = "configs/config.yaml") -> dict:
 
 def load_passages(config: dict):
     path = config["data"]["ms_marco_passages_path"]
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     passages    = [p["passage_text"] for p in raw]
     passage_ids = [p["passage_id"]   for p in raw]
@@ -295,7 +299,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--query",
-        default="what are the effects of global warming on sea levels",
+        default="what are some problems associated with burning fossil fuels",
         help="Query string to search",
     )
     parser.add_argument(

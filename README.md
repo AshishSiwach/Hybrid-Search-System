@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 [![FAISS](https://img.shields.io/badge/FAISS-HNSW-orange)](https://github.com/facebookresearch/faiss)
 [![MS MARCO](https://img.shields.io/badge/Dataset-MS%20MARCO-green)](https://microsoft.github.io/msmarco/)
+[![Live Demo](https://img.shields.io/badge/Live-QueryLens-blueviolet)](https://ashishsiwach-querylens.streamlit.app)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 ---
@@ -13,34 +14,81 @@
 
 This project builds and evaluates a multi-stage hybrid search system that mirrors production information retrieval architectures — specifically how [Perplexity AI](https://vespa.ai/perplexity/) retrieves and ranks passages before generating answers.
 
-The pipeline compares four methods head-to-head in an ablation study:
+A live demo is deployed at **[ashishsiwach-querylens.streamlit.app](https://ashishsiwach-querylens.streamlit.app)** — search any query, get ranked passages and an AI-generated answer grounded in the retrieved results.
+
+The pipeline compares **four methods** head-to-head in a full ablation study:
 
 | Method | What it does |
 |---|---|
-| BM25 only | Keyword matching — fast, exact, no semantics |
-| Dense only | FAISS HNSW ANN search over sentence embeddings |
-| Hybrid (RRF) | Fuses BM25 + Dense rankings with Reciprocal Rank Fusion |
-| Hybrid + Reranker | Adds a cross-encoder reranker on top of the hybrid results |
+| **BM25 only** | Keyword matching — fast, exact, no semantics |
+| **Dense only** | FAISS HNSW ANN search over sentence embeddings |
+| **Hybrid (RRF)** | Fuses BM25 + Dense rankings with Reciprocal Rank Fusion |
+| **Hybrid + Reranker** | Adds a cross-encoder reranker on top of the hybrid results |
 
-Each method is evaluated using standard IR metrics (MAP, NDCG, MRR, Precision, Recall) on a random 10k-query sample from MS MARCO v1.1, with a separate domain analysis pass on climate/energy-tagged queries.
-
-A final generation layer uses the top-3 retrieved passages to produce a grounded answer via Claude Haiku — completing the full RAG loop that Perplexity runs in production.
+Each method is evaluated using standard IR metrics (**MAP, NDCG, MRR, Precision, Recall**) on **20,000 MS MARCO queries (~164,000 passages)**, with a separate climate domain analysis pass on climate/energy-tagged queries.
 
 ---
 
-## Key design decisions
+## Results
 
-**FAISS HNSW instead of brute-force cosine similarity**
-The original `sklearn.cosine_similarity` approach computes O(n) dot products per query. `faiss.IndexHNSWFlat` builds a hierarchical graph index at build time, reducing query time to O(log n). On 10k passages: 14.6ms → 0.4ms per query (36x speedup) at 95%+ recall.
+Evaluated on **200 randomly sampled queries** from the 20k-query corpus.
 
-**Reservoir sampling for the dataset**
-MS MARCO v1.1 has 100k queries. Rather than keyword-filtering (which risks an insufficient sample), uniform random sampling via reservoir algorithm is used — no full download needed, reproducible via seed, general-purpose (not domain-restricted).
+### General evaluation (all queries)
 
-**Climate domain subsection**
-Every query is tagged `is_climate=True/False` at build time. The evaluator runs two passes automatically: one on all queries, one on climate-tagged queries only. This produces a domain analysis showing whether retrieval quality differs on domain-specific vs general queries.
+| Method | MAP@5 | NDCG@10 | MRR | Precision@5 | Recall@10 |
+|---|---|---|---|---|---|
+| BM25 only | 0.245 | 0.358 | 0.292 | 0.102 | 0.619 |
+| Dense only | 0.444 | 0.570 | 0.483 | 0.158 | 0.873 |
+| Hybrid (RRF) | 0.381 | 0.500 | 0.425 | 0.147 | 0.797 |
+| **Hybrid + Reranker** | **0.510** | **0.626** | **0.540** | **0.177** | **0.914** |
 
-**Two-stage pipeline (retrieve → rerank)**
-The cross-encoder is only run on the top-50 candidates from the hybrid retriever — never over the full corpus. This keeps the expensive reranker cost fixed regardless of corpus size, mirroring production architectures.
+### Climate domain subsection
+
+| Method | MAP@5 | NDCG@10 | MRR | Precision@5 | Recall@10 |
+|---|---|---|---|---|---|
+| BM25 only | 0.255 | 0.351 | 0.291 | 0.101 | 0.592 |
+| Dense only | 0.349 | 0.488 | 0.397 | 0.132 | 0.824 |
+| Hybrid (RRF) | 0.323 | 0.445 | 0.374 | 0.118 | 0.729 |
+| **Hybrid + Reranker** | **0.510** | **0.626** | **0.540** | **0.170** | **0.915** |
+
+### Key findings
+
+- **Dense > Hybrid RRF** — Dense consistently outperforms Hybrid RRF because RRF dilutes the stronger Dense signal when one method is significantly better than the other. Fusion hurts when the two inputs are asymmetric in quality.
+- **Reranker fixes RRF dilution** — The cross-encoder reranker re-scores all candidates jointly from scratch, bypassing the RRF weakness entirely and delivering the best results on every metric.
+- **91.4% Recall@10 on 164k passages** — The system surfaces 9 out of every 10 relevant passages in the top 10 results. For a RAG generation layer, this means near-complete information coverage on every query.
+- **Precision@5 ceiling is 0.20** — MS MARCO has only 1 relevant passage per query by design, making 0.20 the theoretical maximum. The system achieves 0.177, meaning the relevant passage appears in the top 5 **~88% of the time**.
+- **Climate domain matches general performance** — Hybrid + Reranker achieves identical MAP@5 (0.510) and near-identical Recall@10 (0.915) on climate-specific queries, confirming the pipeline generalises across domains without domain-specific tuning.
+
+---
+
+## Dataset & Build Methodology
+
+The corpus was built on **Google Colab (T4 GPU)** for efficiency using `colab_build.py`.
+
+**Corpus statistics:**
+- **20,000 queries** from MS MARCO v1.1 train split
+- **164,320 passages** indexed
+- Climate/energy queries tagged using a **46-keyword regex** (35 topic areas)
+
+**Build steps on Colab T4 GPU:**
+
+| Step | Time |
+|---|---|
+| Stream 20k queries from HuggingFace | ~5 min |
+| Encode 164k passages (`all-MiniLM-L6-v2`, `batch_size=512`) | ~12 min |
+| Build FAISS HNSW index (`M=32`, `efConstruction=200`) | ~11 min |
+| Build BM25Okapi index | ~3 min |
+| **Total** | **~31 min** |
+
+**Why GPU?** Encoding 164k passages at `batch_size=512` takes ~12 minutes on a T4 GPU vs ~2+ hours on CPU. The FAISS HNSW index build is CPU-based regardless.
+
+Embeddings are **L2-normalised** before indexing so inner product equals cosine similarity at zero extra cost. All 5 artefacts are uploaded to a private HuggingFace dataset and downloaded automatically on Streamlit Cloud at first run.
+
+To reproduce locally instead of Colab:
+```bash
+python dataset_builder.py --max-queries 20000
+python main.py
+```
 
 ---
 
@@ -48,32 +96,30 @@ The cross-encoder is only run on the top-50 candidates from the hybrid retriever
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  dataset_builder.py                                            │
-│  Stream MS MARCO → reservoir sample → climate tag → save JSON  │
+│  colab_build.py  (or dataset_builder.py locally)               │
+│  Stream MS MARCO → tag climate queries → encode on GPU         │
+│  → passages JSON + embeddings + FAISS + BM25 indexes           │
 └───────────────────────────┬────────────────────────────────────┘
-                            │  (run once)
+                            │  (built once, stored on HuggingFace)
                             ▼
 ┌────────────────────────────────────────────────────────────────┐
 │  main.py — ExperimentRunner                                    │
 │                                                                │
 │  ┌─────────────────────┐    ┌──────────────────────────────┐  │
 │  │  BM25Retriever       │    │  DenseRetriever               │  │
-│  │  rank_bm25 inverted  │    │  sentence-transformers        │  │
-│  │  index               │    │  → FAISS IndexHNSWFlat        │  │
+│  │  rank_bm25 index     │    │  sentence-transformers        │  │
+│  │                      │    │  → FAISS IndexHNSWFlat        │  │
 │  └──────────┬──────────┘    └──────────────┬───────────────┘  │
-│             │                               │                  │
 │             └──────────────┬────────────────┘                  │
 │                            ▼                                   │
 │              ┌─────────────────────────┐                       │
 │              │  HybridRetriever (RRF)  │                       │
 │              │  score = Σ 1/(k+rank)   │                       │
-│              │  top-50 candidates      │                       │
 │              └────────────┬────────────┘                       │
 │                           ▼                                    │
 │              ┌─────────────────────────┐                       │
 │              │  CrossEncoderReranker   │                       │
 │              │  ms-marco-MiniLM-L-6   │                       │
-│              │  final top-10           │                       │
 │              └────────────┬────────────┘                       │
 │                           ▼                                    │
 │              ┌─────────────────────────┐                       │
@@ -83,47 +129,35 @@ The cross-encoder is only run on the top-50 candidates from the hybrid retriever
 │              └─────────────────────────┘                       │
 └────────────────────────────────────────────────────────────────┘
                             │
-                            ▼  (demo only)
+                            ▼  (live demo)
 ┌────────────────────────────────────────────────────────────────┐
-│  demo.py — Claude Haiku generation layer                        │
-│  Top-3 passages → grounded answer + cited sources              │
+│  streamlit_app.py (QueryLens)                                  │
+│  Downloads indexes from HuggingFace on first run               │
+│  Top-5 results + Claude Haiku generated answer                 │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Results (expected)
-
-Results improve progressively through the pipeline:
-
-| Method | MAP@5 | NDCG@10 | MRR | Precision@5 |
-|---|---|---|---|---|
-| BM25 only | ~0.55 | ~0.61 | ~0.63 | ~0.42 |
-| Dense only | ~0.62 | ~0.67 | ~0.70 | ~0.48 |
-| Hybrid (RRF) | ~0.70 | ~0.75 | ~0.78 | ~0.55 |
-| **Hybrid + Reranker** | **~0.78** | **~0.83** | **~0.86** | **~0.62** |
-
-*Run `python main.py` to generate actual results on your sampled dataset.*
-
----
-
-## Quick start
+## Quick Start
 
 ### 1. Install dependencies
 
 ```bash
 pip install rank-bm25 sentence-transformers faiss-cpu datasets \
-            numpy scikit-learn pyyaml matplotlib seaborn pandas
+            numpy scikit-learn pyyaml matplotlib seaborn pandas \
+            huggingface_hub streamlit
 ```
 
-### 2. Build the dataset (run once)
+### 2a. Build dataset on Colab (recommended)
+
+Open `colab_build.py` in Google Colab with a **T4 GPU** runtime. Run all cells (~31 min). Downloads all 5 data files on completion — place them in your `data/` folder.
+
+### 2b. Build dataset locally (CPU)
 
 ```bash
-# Default: 10k random queries (~100k passages)
-python dataset_builder.py
-
-# Full dataset (encode embeddings overnight once, cached after)
-python dataset_builder.py --max-queries 100000
+python dataset_builder.py --max-queries 20000  # match Colab build (~2hr CPU)
+python dataset_builder.py --max-queries 10000  # quick local test (~12 min)
 ```
 
 ### 3. Run the ablation study
@@ -132,120 +166,58 @@ python dataset_builder.py --max-queries 100000
 python main.py
 ```
 
-This runs two evaluation passes (general + climate domain), saves `results/results.json`, and generates `results/results_visualization.png`.
+Outputs: `results/results.json` and `results/results_visualization.png`
 
-### 4. Run the demo
+### 4. Run the live demo
 
 ```bash
-# Retrieval only
-python demo.py --query "what causes global warming" --top-k 5
+# Optional: set API key for AI-generated answers
+set ANTHROPIC_API_KEY=sk-ant-...
 
-# With generated answer (requires Anthropic API key)
-export ANTHROPIC_API_KEY="your-key-here"
-python demo.py --query "what causes global warming"
-
-# Skip generation
-python demo.py --query "carbon tax policy" --no-generate
+python -m streamlit run streamlit_app.py
 ```
 
-**Demo output:**
-```
-Query: "what causes global warming"
-
-BM25 only  (3.2ms)
-  #1  score=12.43  ✓ relevant
-      Greenhouse gases such as CO2 and methane trap heat...
-      source: https://climate.nasa.gov/causes/
-
-Dense only  (0.8ms)
-  #1  score=0.9421  ✓ relevant
-      Human activities are the primary driver of observed...
-      ...
-
-Relevant passages in top-5:
-  BM25 only             [██···]  2/5
-  Dense only            [███··]  3/5
-  Hybrid (RRF)          [████·]  4/5
-  Hybrid + Reranker     [█████]  5/5
-
-Generated answer  (Claude Haiku):
-  Global warming is primarily caused by greenhouse gas emissions
-  from human activities [1]. CO2 from burning fossil fuels
-  accounts for the largest share [2], while deforestation
-  reduces the planet's ability to absorb carbon [3].
-
-  References:
-    [1] https://climate.nasa.gov/causes/
-    [2] https://www.ipcc.ch/report/ar6/...
-    [3] https://noaa.gov/...
-```
+Or visit the deployed version: **[ashishsiwach-querylens.streamlit.app](https://ashishsiwach-querylens.streamlit.app)**
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
 Hybrid-Search-System/
 ├── configs/
 │   └── config.yaml             # All settings: models, paths, metrics
-├── data/                       # Auto-generated, gitignored
-│   ├── ms_marco_passages.json  # Built by dataset_builder.py
-│   ├── ms_marco_queries.json
-│   ├── doc_embeddings.npy      # Cached sentence embeddings
-│   ├── faiss_hnsw.index        # Cached FAISS index
-│   └── bm25_index.pkl          # Cached BM25 index
-├── results/                    # Auto-generated, gitignored
+├── data/                       # Built by colab_build.py or dataset_builder.py
+│   ├── ms_marco_passages.json  # 164k passages
+│   ├── ms_marco_queries.json   # 20k queries with is_climate flag
+│   ├── doc_embeddings.npy      # 384-dim sentence embeddings
+│   ├── faiss_hnsw.index        # FAISS HNSW index (M=32, efConstruction=200)
+│   └── bm25_index.pkl          # BM25Okapi index
+├── results/
 │   ├── results.json
 │   └── results_visualization.png
-├── __init__.py                 # Package exports
-├── data_loader.py              # MSMarcoLoader + DocumentLoader
-├── dataset_builder.py          # Reservoir sampling + climate tagging
-├── demo.py                     # Query demo + generation layer
+├── __init__.py
+├── colab_build.py              # GPU build script (Google Colab T4)
+├── data_loader.py              # MSMarcoLoader + I/O helpers
+├── dataset_builder.py          # Local CPU dataset builder
+├── demo.py                     # CLI demo with generation
 ├── evaluator.py                # MAP, NDCG, MRR, Precision, Recall
-├── main.py                     # Experiment runner (ablation study)
+├── find_queries.py             # Find good demo queries from dataset
+├── main.py                     # Ablation study runner
 ├── reranker.py                 # CrossEncoderReranker + RetrievalPipeline
-├── retrievers.py               # BM25Retriever, DenseRetriever (FAISS), HybridRetriever
-├── requirements.txt
-└── README.md
+├── retrievers.py               # BM25, DenseRetriever (FAISS), HybridRetriever
+├── streamlit_app.py            # QueryLens — deployed on Streamlit Cloud
+├── upload_to_hf.py             # Upload data files to HuggingFace
+└── requirements.txt
 ```
 
 ---
 
-## Configuration
-
-All settings live in `configs/config.yaml`. Key parameters:
-
-```yaml
-models:
-  dense_encoder:
-    name: "all-MiniLM-L6-v2"        # any sentence-transformers model
-  cross_encoder:
-    name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-
-retrieval:
-  dense:
-    hnsw_m: 32           # HNSW graph connectivity — higher = better recall, more RAM
-    hnsw_ef_search: 64   # Search beam width — higher = better recall, slower
-  fusion:
-    rrf_k: 60            # RRF constant (Cormack et al. 2009 default)
-  reranking:
-    top_k: 10            # Final results returned
-
-evaluation:
-  test_queries: 200      # Queries per evaluation pass
-
-dataset_builder:
-  max_queries: 10000     # Increase to 100000 for full dataset
-  seed: 42               # Reproducibility
-```
-
----
-
-## Technical details
+## Technical Details
 
 ### FAISS HNSW
 
-Dense retrieval uses `faiss.IndexHNSWFlat` with `METRIC_INNER_PRODUCT`. Embeddings are L2-normalised before indexing, so inner product equals cosine similarity — no division needed at query time. The HNSW graph navigates from a coarse entry point down through layers, visiting only ~5–15% of the corpus per query.
+Dense retrieval uses `faiss.IndexHNSWFlat` with `METRIC_INNER_PRODUCT`. Embeddings are **L2-normalised** before indexing so inner product equals cosine similarity. Build parameters: **`M=32`**, **`efConstruction=200`**. Query-time: `efSearch=64`. On 164k vectors: **~1ms per query**.
 
 ### Reciprocal Rank Fusion
 
@@ -253,109 +225,24 @@ Dense retrieval uses `faiss.IndexHNSWFlat` with `METRIC_INNER_PRODUCT`. Embeddin
 RRF(d) = Σ  1 / (k + rank_i(d))
 ```
 
-where the sum is over all ranking lists (BM25 + dense). k=60 is the standard default from Cormack et al. (2009). RRF rewards passages that rank consistently well across both methods — a passage ranked #1 by one method and #50 by the other scores lower than one ranked #5 by both.
+**k=60** is the standard default from Cormack et al. (2009). Rewards passages that rank consistently well across both BM25 and Dense — a passage ranked #1 by one method and #50 by the other scores lower than one ranked #5 by both.
 
-### Two-stage pipeline
+### Two-Stage Pipeline
 
-Stage 1 (retrieval): BM25 + FAISS each return top-50 candidates cheaply. RRF fuses them into a merged top-50 list.
-Stage 2 (reranking): Cross-encoder scores each of the 50 query-passage pairs jointly (not independently) and re-orders to top-10. Cross-encoders are more accurate than bi-encoders but too slow to run over the full corpus — the two-stage design keeps the expensive model cost fixed regardless of corpus size.
+**Stage 1 (retrieval):** BM25 + FAISS each return top-50 candidates cheaply. RRF fuses into a merged top-50 list.
 
-### Domain analysis
-
-`dataset_builder.py` tags every query with `is_climate=True/False` using a 35-keyword regex covering climate science, energy, policy, and finance terms. `main.py` runs the ablation study twice — once on all queries, once on climate-tagged queries only — and visualises both side by side. This tests whether general-purpose retrieval models degrade on domain-specific vocabulary.
-
----
-
-## Usage examples
-
-### Search programmatically
-
-```python
-import yaml
-from retrievers import BM25Retriever, DenseRetriever, HybridRetriever
-from reranker import CrossEncoderReranker, RetrievalPipeline
-
-with open("configs/config.yaml") as f:
-    config = yaml.safe_load(f)
-
-# Build retrievers (assuming indexes already built)
-bm25  = BM25Retriever(config)
-dense = DenseRetriever(config)
-dense.load_faiss_index(config["data"]["faiss_index_path"])
-
-hybrid   = HybridRetriever(bm25, dense, config)
-reranker = CrossEncoderReranker(config)
-pipeline = RetrievalPipeline(hybrid, reranker, passages)
-
-indices, scores = pipeline.search("carbon pricing mechanisms in Europe")
-for rank, (idx, score) in enumerate(zip(indices[:5], scores[:5]), 1):
-    print(f"#{rank}  {score:.4f}  {passages[idx][:100]}")
-```
-
-### Evaluate a custom query set
-
-```python
-from evaluator import Evaluator
-
-evaluator = Evaluator(config)
-
-ranked_list    = [45, 12, 78, 3, ...]   # passage indices, ranked
-relevance      = {"p_45": 1, "p_12": 0, "p_78": 1, ...}
-
-scores = evaluator.evaluate_query(ranked_list, relevance)
-print(f"MAP@10:  {scores['map@10']:.4f}")
-print(f"NDCG@10: {scores['ndcg@10']:.4f}")
-print(f"MRR:     {scores['mrr']:.4f}")
-```
-
----
-
-## Evaluation metrics
-
-**MAP@K (Mean Average Precision)** — average precision computed at each rank where a relevant passage appears, averaged over all queries. Rewards finding relevant passages early and consistently.
-
-**NDCG@K (Normalised Discounted Cumulative Gain)** — measures the quality of ranking by discounting the value of relevant passages found at lower ranks. A relevant passage at rank 1 is worth more than one at rank 10.
-
-**MRR (Mean Reciprocal Rank)** — `1 / rank` of the first relevant passage, averaged over queries. Particularly meaningful for MS MARCO where most queries have exactly one relevant passage.
-
-**Precision@K** — fraction of the top-K results that are relevant.
-
-**Recall@K** — fraction of all relevant passages that appear in the top-K results.
-
----
-
-## References
-
-- **BM25**: Robertson & Zaragoza, [The Probabilistic Relevance Framework: BM25 and Beyond](https://www.staff.city.ac.uk/~sb317/papers/foundations_bm25_review.pdf), 2009
-- **Dense Retrieval**: Karpukhin et al., [Dense Passage Retrieval for Open-Domain QA](https://arxiv.org/abs/2004.04906), EMNLP 2020
-- **RRF**: Cormack et al., [Reciprocal Rank Fusion outperforms Condorcet and individual rank learning methods](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf), SIGIR 2009
-- **Cross-Encoders**: Nogueira & Cho, [Passage Re-ranking with BERT](https://arxiv.org/abs/1901.04085), 2019
-- **MS MARCO**: Bajaj et al., [MS MARCO: A Human Generated MAchine Reading COmprehension Dataset](https://arxiv.org/abs/1611.09268), 2016
-- **FAISS**: Johnson et al., [Billion-scale similarity search with GPUs](https://arxiv.org/abs/1702.08734), 2017
-- **Perplexity architecture**: [How Perplexity uses Vespa.ai](https://vespa.ai/perplexity/), 2025
+**Stage 2 (reranking):** Cross-encoder scores each of the 50 query-passage pairs jointly and re-orders to top-10. Cross-encoders are more accurate than bi-encoders but too slow over the full corpus — the two-stage design keeps reranker cost **fixed regardless of corpus size**.
 
 ---
 
 ## Author
 
-**Ashish Siwach**
+**Ashish Siwach** — MSc Business Analytics (Distinction), University of Exeter
 
-MSc Business Analytics (Distinction), University of Exeter
-Data Scientist — Search, NLP, and ML
-
+- Live demo: [ashishsiwach-querylens.streamlit.app](https://ashishsiwach-querylens.streamlit.app)
 - Portfolio: [ashishsiwach.com](https://portfolio-five-silk-56.vercel.app/)
 - GitHub: [@AshishSiwach](https://github.com/AshishSiwach)
 - LinkedIn: [ashish-siwach](https://www.linkedin.com/in/ashish-siwach)
-
----
-
-## Future work
-
-- [ ] Learned sparse retrieval (SPLADE) as an additional baseline
-- [ ] HNSW hyperparameter sweep (hnsw_m, ef_search) with recall vs latency curves
-- [ ] Latency benchmarks: BM25 / Dense / Reranker stage timings at 10k and 100k scale
-- [ ] Query expansion using pseudo-relevance feedback
-- [ ] REST API deployment with FastAPI + caching layer
 
 ---
 

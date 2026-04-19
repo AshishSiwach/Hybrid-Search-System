@@ -80,20 +80,33 @@ class ExperimentRunner:
         bm25       = BM25Retriever(self.config)
         index_path = self.config["data"]["index_path"]
         if Path(index_path).exists():
+            logger.info("Loading cached BM25 index")
             bm25.index = load_bm25_index(index_path)
-            bm25.tokenized_corpus = [p.lower().split() for p in self.passages]
+            # Tokenized corpus is stored inside the BM25 index object itself
+            # No need to rebuild it from passages — saves several minutes on large corpus
         else:
+            logger.info("Building BM25 index from scratch")
             bm25.build_index(self.passages)
             save_bm25_index(bm25.index, index_path)
 
-        dense           = DenseRetriever(self.config)
-        faiss_path      = self.config["data"]["faiss_index_path"]
-        emb_path        = self.config["data"]["embeddings_path"]
+        dense      = DenseRetriever(self.config)
+        faiss_path = self.config["data"]["faiss_index_path"]
+        emb_path   = self.config["data"]["embeddings_path"]
 
-        if Path(faiss_path).exists() and Path(emb_path).exists():
-            logger.info("Loading cached FAISS index and embeddings")
+        if Path(faiss_path).exists():
+            # Best case — FAISS index ready, no encoding needed
+            logger.info("Loading cached FAISS index")
             dense.load_faiss_index(faiss_path)
+        elif Path(emb_path).exists():
+            # Embeddings exist but FAISS index missing (e.g. interrupted run)
+            # Rebuild FAISS from cached embeddings — no re-encoding needed
+            logger.info("Cached embeddings found — rebuilding FAISS index (no re-encoding)")
+            embeddings = load_embeddings(emb_path)
+            dense.load_embeddings(embeddings)
+            dense.save_faiss_index(faiss_path)
         else:
+            # First run — encode from scratch, then cache both
+            logger.info("No cache found — encoding passages (runs once, ~12 min)")
             embeddings = dense.encode_documents(self.passages)
             save_embeddings(embeddings, emb_path)
             dense.save_faiss_index(faiss_path)

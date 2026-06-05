@@ -24,12 +24,16 @@ import argparse
 import json
 import logging
 import os
+import sys
 import time
 import urllib.request
 import urllib.error
 import yaml
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Make `querylens` importable when this script is run from the project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 load_dotenv()
 
@@ -55,8 +59,8 @@ def load_passages(config: dict):
 
 
 def build_retrievers(config, passages):
-    from data_loader import load_embeddings, load_bm25_index, save_embeddings, save_bm25_index
-    from retrievers import BM25Retriever, DenseRetriever, HybridRetriever
+    from querylens.data_loader import load_embeddings, load_bm25_index, save_embeddings, save_bm25_index
+    from querylens.retrievers  import BM25Retriever, DenseRetriever, HybridRetriever
 
     print("  Loading BM25 index...")
     bm25       = BM25Retriever(config)
@@ -84,7 +88,7 @@ def build_retrievers(config, passages):
 
 
 def build_pipelines(bm25, dense, hybrid, passages, config):
-    from reranker import CrossEncoderReranker, RetrievalPipeline
+    from querylens.reranker import CrossEncoderReranker, RetrievalPipeline
     reranker = CrossEncoderReranker(config)
 
     pipelines = {
@@ -107,12 +111,7 @@ def build_pipelines(bm25, dense, hybrid, passages, config):
 GENERATION_MODEL = "claude-haiku-4-5-20251001"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
-SYSTEM_PROMPT = (
-    "You are a factual search assistant. Answer the user's query concisely "
-    "using ONLY the provided passages. Cite each fact with [1], [2], or [3] "
-    "corresponding to the passage number. If the passages do not contain "
-    "enough information, say so. Do not add external knowledge."
-)
+from querylens.prompts import DEMO_SYSTEM_PROMPT as SYSTEM_PROMPT
 
 
 def generate_answer(query: str, top_passages: list, top_urls: list) -> str:

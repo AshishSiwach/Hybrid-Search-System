@@ -19,10 +19,12 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import numpy as np
+
+from querylens.safety import detect_injection
 
 
 # ── Public output contract ───────────────────────────────────────────────────
@@ -39,6 +41,9 @@ class SearchDecision:
     score_gap: float
     ambiguous: bool = False                  # True when top results are tied
     rejected: bool = False                   # True when query validation failed
+    rejected_reason: Optional[str] = None    # "validation" | "safety" | None — categorical
+                                             # source of the rejection. The human-readable
+                                             # message stays in `warning`.
 
 
 # ── The decision layer ───────────────────────────────────────────────────────
@@ -113,6 +118,16 @@ class DecisionLayer:
         Cheap pre-flight check. Returns a rejected SearchDecision if the query
         is unusable; returns None when the query is OK to pass to Layer 1.
 
+        Check order (cheapest first):
+          1. Empty / whitespace               → reason "validation"
+          2. Length bounds                    → reason "validation"
+          3. Alphanumeric content             → reason "validation"
+          4. Injection-pattern match (safety) → reason "safety"
+
+        Safety-rejected queries get a deliberately vague user-facing message
+        ("Query could not be processed.") so attackers can't fingerprint which
+        pattern fired. The matched pattern is preserved in telemetry only.
+
         Caller pattern:
             decision = layer.validate_query(q)
             if decision is None:
@@ -120,15 +135,27 @@ class DecisionLayer:
         """
         q = (query or "").strip()
 
-        reason: Optional[str] = None
+        reason:          Optional[str] = None
+        rejected_reason: Optional[str] = None
+        safety_pattern:  Optional[str] = None
+
         if not q:
-            reason = "Please enter a query."
+            reason, rejected_reason = "Please enter a query.", "validation"
         elif len(q) < self.MIN_QUERY_LENGTH:
-            reason = "Query is too short — try a few more words."
+            reason, rejected_reason = "Query is too short — try a few more words.", "validation"
         elif len(q) > self.MAX_QUERY_LENGTH:
-            reason = f"Query is too long (over {self.MAX_QUERY_LENGTH} characters)."
+            reason, rejected_reason = (
+                f"Query is too long (over {self.MAX_QUERY_LENGTH} characters).",
+                "validation",
+            )
         elif not any(c.isalnum() for c in q):
-            reason = "Query needs at least some letters or numbers."
+            reason, rejected_reason = "Query needs at least some letters or numbers.", "validation"
+        else:
+            matched = detect_injection(q)
+            if matched is not None:
+                reason          = "Query could not be processed."   # deliberately vague
+                rejected_reason = "safety"
+                safety_pattern  = matched
 
         if reason is None:
             return None
@@ -144,8 +171,16 @@ class DecisionLayer:
             score_gap=0.0,
             ambiguous=False,
             rejected=True,
+            rejected_reason=rejected_reason,
         )
-        self._log(query, decision)
+        # Pattern goes to telemetry only — never returned in the dataclass,
+        # never surfaced in the UI. Lets us analyse attack attempts offline
+        # without exposing detection internals to clients.
+        self._log(
+            query,
+            decision,
+            extra={"safety_pattern": safety_pattern} if safety_pattern else None,
+        )
         return decision
 
     # ── 2. Main decide() ─────────────────────────────────────────────────────
@@ -434,9 +469,21 @@ class DecisionLayer:
             return "Some near-duplicate results were removed to improve diversity."
         return None
 
-    def _log(self, query: str, decision: SearchDecision) -> None:
+    def _log(
+        self,
+        query:    str,
+        decision: SearchDecision,
+        extra:    Optional[Dict[str, Any]] = None,
+    ) -> None:
         """
         Append the decision to a JSONL telemetry file. Never crashes the request.
+
+        Args:
+            query:    The original query (truncated to 200 chars in the log).
+            decision: The SearchDecision being recorded.
+            extra:    Optional dict of additional fields to merge into the entry.
+                      Used by validate_query() to log the matched safety pattern
+                      without leaking it into the SearchDecision dataclass.
 
         Each line is a self-contained JSON object — easy to ingest with
         `pandas.read_json(..., lines=True)` or duckdb for offline analysis.
@@ -444,7 +491,7 @@ class DecisionLayer:
         if not self.enable_telemetry:
             return
         try:
-            entry = {
+            entry: Dict[str, Any] = {
                 "ts":                    datetime.now(timezone.utc).isoformat(),
                 "query":                 (query or "")[:200],
                 "confidence":            decision.confidence,
@@ -456,8 +503,11 @@ class DecisionLayer:
                 "n_results":             len(decision.final_results),
                 "should_generate_answer": decision.should_generate_answer,
                 "rejected":              decision.rejected,
+                "rejected_reason":       decision.rejected_reason,
                 "diversifier":           self.diversifier,
             }
+            if extra:
+                entry.update(extra)
             self.telemetry_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.telemetry_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")

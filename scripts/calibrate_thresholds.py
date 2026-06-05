@@ -19,12 +19,16 @@ Prerequisites: run main.py at least once so the FAISS and BM25 indexes exist.
 
 import json
 import logging
+import sys
 import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Make `querylens` importable when this script is run from the project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Batch sizes per device — cross-encoder ms-marco-MiniLM-L-6-v2 is tiny (~80 MB),
 # so a 6 GB GPU comfortably handles 64.  Bump GPU_BATCH if you have more VRAM.
@@ -37,10 +41,10 @@ except ImportError:
     def tqdm(it, **kw):          # silent fallback if tqdm not installed
         return it
 
-from data_loader import MSMarcoLoader, load_embeddings, load_bm25_index
-from retrievers  import BM25Retriever, DenseRetriever, HybridRetriever
-from reranker    import CrossEncoderReranker
-from decision    import DecisionLayer
+from querylens.data_loader import MSMarcoLoader, load_embeddings, load_bm25_index
+from querylens.retrievers  import BM25Retriever, DenseRetriever, HybridRetriever
+from querylens.reranker    import CrossEncoderReranker
+from querylens.decision    import DecisionLayer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)

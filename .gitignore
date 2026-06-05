@@ -1,12 +1,42 @@
+# Data + results — large or environment-specific
 data/
 results/
-__pycache__/
-*.pyc
 *.npy
 *.pkl
 *.index
-*.pptx
-.env
+
+# Telemetry / decision logs (per-environment, not for git)
+results/decisions.jsonl
+
+# Internal portfolio docs — not for public push
+docs/LAYER_2.md
+docs/LAYER_2_THINKING.md
+
+# Python build / cache
+__pycache__/
+*.pyc
+*.pyo
 *.egg-info/
+build/
 dist/
+
+# Test cache
+.pytest_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Misc
+*.pptx

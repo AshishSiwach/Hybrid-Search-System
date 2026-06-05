@@ -54,7 +54,7 @@ The pattern matters because LLMs are agreeable. Pass them three off-topic passag
 
 ## What was built
 
-### `decision.py` — the Layer 2 module
+### `querylens/decision.py` — the Layer 2 module
 
 A single class, `DecisionLayer`, with six responsibilities:
 
@@ -107,7 +107,7 @@ The `should_generate_answer` flag is still the production-critical piece. When i
 
 The embeddings array (`doc_embeddings.npy`) is loaded directly in `load_pipeline()` because the FAISS-only load path doesn't populate `DenseRetriever.doc_embeddings`. If it can't be loaded, MMR silently degrades to Jaccard — never crashes.
 
-### `calibrate_thresholds.py` — the data-driven calibration
+### `scripts/calibrate_thresholds.py` — the data-driven calibration
 
 The thresholds originally picked (`4.0 / 0.0 / -2.0`) were educated guesses from the cross-encoder's published behaviour on MS MARCO. They're a reasonable prior, but they aren't calibrated to *this* corpus.
 
@@ -131,7 +131,7 @@ Three implementation details worth knowing:
 
 - **GPU-adaptive.** `detect_device()` picks CUDA when available and bumps batch size to 64. On an RTX 4050 the full sweep finishes in ~1–2 minutes; on CPU it takes 25–40.
 - **Live "current" values.** The plot's "current threshold" lines are read from `DecisionLayer.HIGH_THRESHOLD` etc. at import time, not hardcoded into the script. So after you apply the recommendations, re-running the script shows the delta vs the *deployed* values — no drift, ever.
-- **Cross-encoder only.** The script sweeps the primary path's logit thresholds. Dense fallback thresholds (`DENSE_HIGH / MEDIUM / LOW`) remain seeded — they affect ~2–5% of queries and aren't worth calibrating until telemetry shows fallback firing on > 5% of traffic. The trigger is documented in `decision.py` next to the constants.
+- **Cross-encoder only.** The script sweeps the primary path's logit thresholds. Dense fallback thresholds (`DENSE_HIGH / MEDIUM / LOW`) remain seeded — they affect ~2–5% of queries and aren't worth calibrating until telemetry shows fallback firing on > 5% of traffic. The trigger is documented in `querylens/decision.py` next to the constants.
 
 Running this once turns the primary thresholds from "Claude's best guess" into "what the data actually supports on our corpus." The visualization becomes a piece of evidence in the README — proof the system is calibrated, not guessed.
 
@@ -164,15 +164,15 @@ After this round of work the implementation is roughly **85%** of what "producti
 
 The script is built and GPU-adaptive. You still need to run it:
 
-- Execute `python calibrate_thresholds.py` (~1–2 min on the RTX 4050)
-- Replace `HIGH_THRESHOLD / MEDIUM_THRESHOLD / LOW_THRESHOLD` in `decision.py` with the output
+- Execute `python scripts/calibrate_thresholds.py` (~1–2 min on the RTX 4050)
+- Replace `HIGH_THRESHOLD / MEDIUM_THRESHOLD / LOW_THRESHOLD` in `querylens/decision.py` with the output
 - Commit `results/threshold_calibration.png` and `threshold_calibration.json` as evidence
 
 **Skill demonstrated:** turning unprincipled magic numbers into reproducible, data-derived parameters. The script is the engineering work; running it once and committing the artefacts is the credibility.
 
 #### Calibrate dense fallback thresholds (deferred)
 
-`DENSE_HIGH / MEDIUM / LOW` are seeded values (`0.65 / 0.45 / 0.30`). They affect only the ~2–5% of queries where the primary path returns `none`, so they aren't worth a separate calibration sweep yet. The revisit trigger is documented next to the constants in `decision.py`: **once `results/decisions.jsonl` shows `fallback_triggered` on > 5% of queries**, extend `calibrate_thresholds.py` to also sweep dense cosines using the same precision/recall/F1 methodology.
+`DENSE_HIGH / MEDIUM / LOW` are seeded values (`0.65 / 0.45 / 0.30`). They affect only the ~2–5% of queries where the primary path returns `none`, so they aren't worth a separate calibration sweep yet. The revisit trigger is documented next to the constants in `querylens/decision.py`: **once `results/decisions.jsonl` shows `fallback_triggered` on > 5% of queries**, extend `scripts/calibrate_thresholds.py` to also sweep dense cosines using the same precision/recall/F1 methodology.
 
 **Skill demonstrated:** knowing when *not* to calibrate. Engineering judgment is choosing where data work pays off, not blindly applying the methodology everywhere.
 
@@ -197,14 +197,14 @@ Each item below corresponds to a P0/P1/P2 entry from the original review. The fi
 
 | Item | Status | Where |
 |---|---|---|
-| Score-gap demotion (P0.2) | ✅ | `decision.py` — `SCORE_GAP_AMBIGUOUS_THRESHOLD` + demotion logic in `decide()` |
-| Dense-aware fallback (P1.1) | ✅ | `decision.py` — `_classify_dense()` + updated fallback block |
-| JSONL telemetry (P1.2) | ✅ | `decision.py` — `_log()` method, append to `results/decisions.jsonl` |
-| Query validation (P1.3) | ✅ | `decision.py` — `validate_query()` returning rejected `SearchDecision` |
-| Domain normalisation (P2.1, partial) | ✅ | `decision.py` — `_domain()` strips `www.`; subdomain stripping deferred (`tldextract` would be the upgrade) |
+| Score-gap demotion (P0.2) | ✅ | `querylens/decision.py` — `SCORE_GAP_AMBIGUOUS_THRESHOLD` + demotion logic in `decide()` |
+| Dense-aware fallback (P1.1) | ✅ | `querylens/decision.py` — `_classify_dense()` + updated fallback block |
+| JSONL telemetry (P1.2) | ✅ | `querylens/decision.py` — `_log()` method, append to `results/decisions.jsonl` |
+| Query validation (P1.3) | ✅ | `querylens/decision.py` — `validate_query()` returning rejected `SearchDecision` |
+| Domain normalisation (P2.1, partial) | ✅ | `querylens/decision.py` — `_domain()` strips `www.`; subdomain stripping deferred (`tldextract` would be the upgrade) |
 | Stopword fix for Jaccard (P2.1, partial) | ⚠️ Moot | MMR is now the default diversifier; Jaccard only fires when embeddings unavailable, so the stopword inflation is a narrow concern |
 | Unit tests (P2.2) | ✅ | `tests/test_decision.py` — 26 cases, zero model loads, 0.15s |
-| **NEW: MMR diversifier** | ✅ | `decision.py` — `_diversify_mmr()` with λ=0.7, hard-dup cutoff 0.95, falls back to Jaccard when embeddings absent |
+| **NEW: MMR diversifier** | ✅ | `querylens/decision.py` — `_diversify_mmr()` with λ=0.7, hard-dup cutoff 0.95, falls back to Jaccard when embeddings absent |
 
 ---
 
@@ -213,7 +213,7 @@ Each item below corresponds to a P0/P1/P2 entry from the original review. The fi
 If this project is going on a portfolio or being discussed in an interview, here's what the work above signals — concretely, with file references.
 
 ### System design
-- **Separation of concerns**: Retrieval (`retrievers.py`), Decision (`decision.py`), Generation (`streamlit_app.py:generate_answer`) are three independent layers with clear contracts.
+- **Separation of concerns**: Retrieval (`querylens/retrievers.py`), Decision (`querylens/decision.py`), Generation (`streamlit_app.py:generate_answer`) are three independent layers with clear contracts.
 - **Pure-logic modules**: `DecisionLayer` has no model dependencies → testable, swappable, deployable independently.
 - **Structured contracts**: `SearchDecision` dataclass instead of returning a tuple of 7 values.
 
@@ -230,7 +230,7 @@ If this project is going on a portfolio or being discussed in an interview, here
 
 ### Evaluation and calibration
 - Treating thresholds as **learned parameters**, not hardcoded constants.
-- Building `calibrate_thresholds.py` as a one-shot offline tool that produces both a JSON output *and* a visualization — two artefacts, one run.
+- Building `scripts/calibrate_thresholds.py` as a one-shot offline tool that produces both a JSON output *and* a visualization — two artefacts, one run.
 - Choosing **precision ≥ 80% for HIGH, F1-optimal for MEDIUM, recall ≥ 80% for LOW** with explicit rationale documented in the code.
 
 ### Observability mindset
@@ -259,20 +259,20 @@ python -m pytest tests/test_decision.py -v
 
 # 1. Calibrate the cross-encoder thresholds
 #    GPU-adaptive: ~1-2 min on RTX 4050, ~25-40 min on CPU
-python calibrate_thresholds.py
+python scripts/calibrate_thresholds.py
 
 # 2. Inspect the output
 #    Windows: start results\threshold_calibration.png
 results/threshold_calibration.png
 results/threshold_calibration.json
 
-# 3. Update decision.py with the recommended values
+# 3. Update querylens/decision.py with the recommended values
 #    Edit HIGH_THRESHOLD / MEDIUM_THRESHOLD / LOW_THRESHOLD to the script's output
-#    The plot's "current" lines are read live from decision.py — so the next
+#    The plot's "current" lines are read live from querylens/decision.py — so the next
 #    run shows your deltas vs the deployed values, no drift.
 
-# 4. Run main.py to confirm metrics haven't regressed
-python main.py
+# 4. Run scripts/main.py to confirm metrics haven't regressed
+python scripts/main.py
 
 # 5. Test the app end-to-end
 python -m streamlit run streamlit_app.py

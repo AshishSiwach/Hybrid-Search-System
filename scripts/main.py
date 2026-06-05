@@ -5,12 +5,13 @@ Runs two evaluation passes automatically:
   1. General evaluation   — random sample of all MS MARCO queries
   2. Climate subsection   — climate/energy-tagged queries only
 
-Run order:
-  1. python dataset_builder.py   # build dataset once
-  2. python main.py              # run experiments
+Run from the project root:
+  1. python scripts/dataset_builder.py   # build dataset once
+  2. python scripts/main.py              # run experiments
 """
 
 import logging
+import sys
 import yaml
 import json
 from pathlib import Path
@@ -20,14 +21,17 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 import pandas as pd
 
-from data_loader import (
+# Make `querylens` importable when this script is run from the project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from querylens.data_loader import (
     MSMarcoLoader,
     load_embeddings, save_embeddings,
     load_bm25_index, save_bm25_index,
 )
-from retrievers import BM25Retriever, DenseRetriever, HybridRetriever
-from reranker import CrossEncoderReranker, RetrievalPipeline
-from evaluator import Evaluator
+from querylens.retrievers import BM25Retriever, DenseRetriever, HybridRetriever
+from querylens.reranker   import CrossEncoderReranker, RetrievalPipeline
+from querylens.evaluator  import Evaluator
 
 logging.basicConfig(
     level=logging.INFO,

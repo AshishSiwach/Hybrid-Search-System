@@ -11,7 +11,9 @@ Run locally: python -m streamlit run streamlit_app.py
 import time, json, os, sys, urllib.request, logging
 from pathlib import Path
 import numpy as np
-from decision import DecisionLayer
+
+from querylens.decision import DecisionLayer
+from querylens.prompts  import ANSWER_SYSTEM_PROMPT, build_answer_user_message
 
 sys.path.insert(0, str(Path(__file__).parent))
 logging.basicConfig(level=logging.INFO)
@@ -173,9 +175,9 @@ def build_dataset_if_missing(config):
 def load_pipeline():
     try:
         import yaml
-        from data_loader import MSMarcoLoader, load_embeddings, load_bm25_index
-        from retrievers import BM25Retriever, DenseRetriever, HybridRetriever
-        from reranker import CrossEncoderReranker, RetrievalPipeline
+        from querylens.data_loader import MSMarcoLoader, load_embeddings, load_bm25_index
+        from querylens.retrievers  import BM25Retriever, DenseRetriever, HybridRetriever
+        from querylens.reranker    import CrossEncoderReranker, RetrievalPipeline
     except ImportError as e:
         return None, None, None, None, f"Import error: {e}. Run: pip install rank-bm25 sentence-transformers faiss-cpu pyyaml"
 
@@ -257,14 +259,8 @@ def generate_answer(query, top_passages, passages, metadata, api_key):
     payload = json.dumps({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 500,
-        "system": (
-            "You are a helpful search assistant. Answer the query clearly using "
-            "ONLY the provided passages. Structure your answer as numbered points "
-            "with bold headings. Cite each fact with [1], [2], or [3] after the "
-            "relevant sentence. End with a References section listing sources "
-            "as [1], [2], [3] with their URLs. Do not add external knowledge."
-        ),
-        "messages": [{"role": "user", "content": f"Query: {query}\n\nPassages:\n{block}"}],
+        "system": ANSWER_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": build_answer_user_message(query, block)}],
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",

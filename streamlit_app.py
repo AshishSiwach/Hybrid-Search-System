@@ -58,7 +58,14 @@ html, body, [class*="css"] { font-family: "DM Sans", sans-serif; }
     box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
 }
 
-.stButton > button {
+/* Cover both st.button (.stButton) and st.form_submit_button.
+   Newer Streamlit wraps the latter in [data-testid="stFormSubmitButton"]
+   with kind="primaryFormSubmit", which the old selector missed entirely
+   — letting Streamlit's default red show through. */
+.stButton > button,
+[data-testid="stFormSubmitButton"] > button,
+button[kind="primary"],
+button[kind="primaryFormSubmit"] {
     background: #1a1a1a !important;
     color: #fff !important;
     border: none !important;
@@ -68,7 +75,10 @@ html, body, [class*="css"] { font-family: "DM Sans", sans-serif; }
     padding: 12px 0 !important;
     box-shadow: 0 2px 6px rgba(0,0,0,0.15) !important;
 }
-.stButton > button:hover { background: #333 !important; }
+.stButton > button:hover,
+[data-testid="stFormSubmitButton"] > button:hover,
+button[kind="primary"]:hover,
+button[kind="primaryFormSubmit"]:hover { background: #333 !important; }
 
 [data-testid="stExpander"] {
     border: 1px solid #ebebeb !important;

@@ -11,3 +11,4 @@ pandas>=2.0.0
 datasets
 streamlit
 huggingface_hub
+pytest>=7.0

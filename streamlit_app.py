@@ -10,6 +10,8 @@ Run locally: python -m streamlit run streamlit_app.py
 
 import time, json, os, sys, urllib.request, logging
 from pathlib import Path
+import numpy as np
+from decision import DecisionLayer
 
 sys.path.insert(0, str(Path(__file__).parent))
 logging.basicConfig(level=logging.INFO)
@@ -165,17 +167,17 @@ def load_pipeline():
         from retrievers import BM25Retriever, DenseRetriever, HybridRetriever
         from reranker import CrossEncoderReranker, RetrievalPipeline
     except ImportError as e:
-        return None, None, None, f"Import error: {e}. Run: pip install rank-bm25 sentence-transformers faiss-cpu pyyaml"
+        return None, None, None, None, f"Import error: {e}. Run: pip install rank-bm25 sentence-transformers faiss-cpu pyyaml"
 
     if not Path("configs/config.yaml").exists():
-        return None, None, None, "configs/config.yaml not found. Run from your project root."
+        return None, None, None, None, "configs/config.yaml not found. Run from your project root."
 
     with open("configs/config.yaml") as f:
         config = yaml.safe_load(f)
 
     # Build dataset on cloud if missing
     if not build_dataset_if_missing(config):
-        return None, None, None, (
+        return None, None, None, None, (
             "Dataset download failed. Check that: "
             "(1) HuggingFace repo AshishSiwach/querylens-data exists and has all 5 files, "
             "(2) HF_TOKEN is set in Streamlit secrets."
@@ -212,6 +214,15 @@ def load_pipeline():
     hybrid   = HybridRetriever(bm25, dense, config)
     reranker = CrossEncoderReranker(config)
 
+    # Load raw embeddings array for MMR diversification.
+    # FAISS path doesn't populate dense.doc_embeddings, so load directly.
+    embeddings = None
+    if Path(ep).exists():
+        try:
+            embeddings = np.load(ep)
+        except Exception as e:
+            logging.warning("Could not load embeddings for MMR: %s — falling back to Jaccard", e)
+
     pipelines = {
         "BM25 only":         RetrievalPipeline(bm25,   reranker, passages),
         "Dense only":        RetrievalPipeline(dense,  reranker, passages),
@@ -222,7 +233,7 @@ def load_pipeline():
         orig = pipelines[m].search
         pipelines[m].search = lambda q, _o=orig: _o(q, rerank=False)
 
-    return pipelines, passages, metadata, None
+    return pipelines, passages, metadata, embeddings, None
 
 
 def generate_answer(query, top_passages, passages, metadata, api_key):
@@ -269,7 +280,11 @@ def generate_answer(query, top_passages, passages, metadata, api_key):
 # ---------------------------------------------------------------
 # Load pipeline
 # ---------------------------------------------------------------
-pipelines, passages, metadata, error = load_pipeline()
+pipelines, passages, metadata, embeddings, error = load_pipeline()
+
+# Layer 2 instance — picks MMR if embeddings loaded, otherwise Jaccard
+_diversifier = "mmr" if embeddings is not None else "jaccard"
+decision_layer = DecisionLayer(diversifier=_diversifier, enable_telemetry=True)
 
 # ---------------------------------------------------------------
 # Header
@@ -305,23 +320,68 @@ with st.form("search_form", clear_on_submit=False):
 # ---------------------------------------------------------------
 # Run search
 # ---------------------------------------------------------------
-if submitted and query and query.strip():
-    q = query.strip()
+if submitted and query is not None:
+    q = (query or "").strip()
 
-    with st.spinner("Searching..."):
+    # ── Layer 2a: query validation (cheap pre-flight, before any retrieval) ─
+    rejection = decision_layer.validate_query(q)
+
+    if rejection is not None:
+        # Skip search entirely — query was malformed
+        decision  = rejection
+        best      = []
         t_results = {}
-        for method, pipeline in pipelines.items():
-            t0 = time.perf_counter()
-            indices, scores = pipeline.search(q)
-            t_results[method] = {
-                "passages": list(zip(indices[:5], scores[:5])),
-                "latency":  (time.perf_counter() - t0) * 1000,
-            }
+    else:
+        with st.spinner("Searching..."):
+            t_results = {}
+            for method, pipeline in pipelines.items():
+                t0 = time.perf_counter()
+                indices, scores = pipeline.search(q)
+                all_results = list(zip(indices, scores))
+                t_results[method] = {
+                    "passages": all_results[:5],   # display slice
+                    "all":      all_results,        # full list for Layer 2
+                    "latency":  (time.perf_counter() - t0) * 1000,
+                }
 
-    best = t_results["Hybrid + Reranker"]["passages"]
+        # ── Layer 2b: decision logic on retrieval scores ────────────────────
+        decision = decision_layer.decide(
+            query=q,
+            best_results=t_results["Hybrid + Reranker"]["all"],
+            fallback_results={k: v["all"] for k, v in t_results.items() if k != "Hybrid + Reranker"},
+            passages=passages,
+            metadata=metadata,
+            embeddings=embeddings,
+        )
+        best = decision.final_results[:5]
 
-    # AI Answer
-    if ANTHROPIC_API_KEY:
+    # Confidence badge
+    _conf_meta = {
+        "high":   ("#16a34a", "#f0fdf4", "High confidence"),
+        "medium": ("#2563eb", "#eff6ff", "Medium confidence"),
+        "low":    ("#d97706", "#fffbeb", "Low confidence"),
+        "none":   ("#dc2626", "#fef2f2", "No relevant results"),
+    }
+    conf_color, conf_bg, conf_label = _conf_meta[decision.confidence]
+    st.markdown(
+        f"<div style='display:inline-block;padding:4px 12px;border-radius:20px;"
+        f"background:{conf_bg};color:{conf_color};font-family:DM Mono,monospace;"
+        f"font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;"
+        f"margin:20px 0 8px;'>{conf_label}</div>",
+        unsafe_allow_html=True,
+    )
+
+    if decision.warning:
+        st.markdown(
+            f"<div style='background:#fff8f0;border-left:3px solid #d97706;"
+            f"padding:10px 14px;border-radius:0 8px 8px 0;font-size:13px;"
+            f"color:#92400e;margin-bottom:16px;'>{decision.warning}</div>",
+            unsafe_allow_html=True,
+        )
+    # ── /Layer 2 ─────────────────────────────────────────────────────────────
+
+    # AI Answer — gated by Layer 2 confidence
+    if ANTHROPIC_API_KEY and decision.should_generate_answer:
         with st.spinner("Generating answer..."):
             answer = generate_answer(q, best, passages, metadata, ANTHROPIC_API_KEY)
 
@@ -359,52 +419,57 @@ if submitted and query and query.strip():
                 )
             st.divider()
 
-    # Top results
-    st.markdown(
-        "<div style='font-family:DM Mono,monospace;font-size:11px;color:#bbb;"
-        "letter-spacing:0.06em;text-transform:uppercase;margin:8px 0 14px;'>"
-        "Top results &nbsp;&middot;&nbsp; Hybrid + Reranker</div>",
-        unsafe_allow_html=True,
-    )
+    # Top results — only when we have any
+    if best:
+        active_method = decision.fallback_method if decision.fallback_triggered else "Hybrid + Reranker"
+        st.markdown(
+            f"<div style='font-family:DM Mono,monospace;font-size:11px;color:#bbb;"
+            f"letter-spacing:0.06em;text-transform:uppercase;margin:8px 0 14px;'>"
+            f"Top results &nbsp;&middot;&nbsp; {active_method}</div>",
+            unsafe_allow_html=True,
+        )
 
-    for rank, (idx, score) in enumerate(best, 1):
-        idx  = int(idx)
-        text = passages[idx]
-        url  = metadata[idx]["url"]
-        rel  = metadata[idx].get("is_selected", 0)
-        tag  = "  [relevant]" if rel else ""
+        for rank, (idx, score) in enumerate(best, 1):
+            idx  = int(idx)
+            text = passages[idx]
+            url  = metadata[idx]["url"]
+            rel  = metadata[idx].get("is_selected", 0)
+            tag  = "  [relevant]" if rel else ""
 
-        with st.expander(f"#{rank} — {text[:90]}...{tag}", expanded=(rank <= 2)):
-            st.write(text)
-            st.markdown(f"[{url}]({url})")
+            with st.expander(f"#{rank} — {text[:90]}...{tag}", expanded=(rank <= 2)):
+                st.write(text)
+                st.markdown(f"[{url}]({url})")
 
-    # Technical comparison — hidden
-    st.divider()
-    with st.expander("Method comparison", expanded=False):
-        st.caption("BM25  ·  Dense  ·  Hybrid RRF  ·  Hybrid + Reranker")
-        colors = {
-            "BM25 only":         "#4a9eff",
-            "Dense only":        "#2dc77a",
-            "Hybrid (RRF)":      "#e3a020",
-            "Hybrid + Reranker": "#9b6dff",
-        }
-        for method, data in t_results.items():
-            color  = colors[method]
-            winner = method == "Hybrid + Reranker"
-            st.markdown(
-                f"<span style='font-family:DM Mono,monospace;font-size:12px;"
-                f"color:{color};font-weight:{'600' if winner else '400'};'>"
-                f"{'★ ' if winner else ''}{method}&nbsp;&nbsp;"
-                f"<span style='color:#bbb;font-size:11px;'>{data['latency']:.0f}ms</span>"
-                f"</span>",
-                unsafe_allow_html=True,
-            )
-            for rank, (idx, score) in enumerate(data["passages"], 1):
-                idx = int(idx)
-                rel = metadata[idx].get("is_selected", 0)
+    # Technical comparison — only when we actually ran the search
+    if not t_results:
+        pass  # validation rejected — no comparison to show
+    else:
+        st.divider()
+        with st.expander("Method comparison", expanded=False):
+            st.caption("BM25  ·  Dense  ·  Hybrid RRF  ·  Hybrid + Reranker")
+            colors = {
+                "BM25 only":         "#4a9eff",
+                "Dense only":        "#2dc77a",
+                "Hybrid (RRF)":      "#e3a020",
+                "Hybrid + Reranker": "#9b6dff",
+            }
+            for method, data in t_results.items():
+                color  = colors[method]
+                winner = method == "Hybrid + Reranker"
                 st.markdown(
-                    f"&nbsp;&nbsp;`#{rank}` {passages[idx][:100]}..."
-                    f"{'  [relevant]' if rel else ''}",
+                    f"<span style='font-family:DM Mono,monospace;font-size:12px;"
+                    f"color:{color};font-weight:{'600' if winner else '400'};'>"
+                    f"{'★ ' if winner else ''}{method}&nbsp;&nbsp;"
+                    f"<span style='color:#bbb;font-size:11px;'>{data['latency']:.0f}ms</span>"
+                    f"</span>",
                     unsafe_allow_html=True,
                 )
-            st.markdown("---")
+                for rank, (idx, score) in enumerate(data["passages"], 1):
+                    idx = int(idx)
+                    rel = metadata[idx].get("is_selected", 0)
+                    st.markdown(
+                        f"&nbsp;&nbsp;`#{rank}` {passages[idx][:100]}..."
+                        f"{'  [relevant]' if rel else ''}",
+                        unsafe_allow_html=True,
+                    )
+                st.markdown("---")

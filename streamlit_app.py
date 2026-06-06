@@ -12,9 +12,6 @@ import time, json, os, sys, urllib.request, logging
 from pathlib import Path
 import numpy as np
 
-from querylens.decision import DecisionLayer
-from querylens.prompts  import ANSWER_SYSTEM_PROMPT, build_answer_user_message
-
 sys.path.insert(0, str(Path(__file__).parent))
 logging.basicConfig(level=logging.INFO)
 
@@ -259,8 +256,14 @@ def generate_answer(query, top_passages, passages, metadata, api_key):
     payload = json.dumps({
         "model": "claude-haiku-4-5-20251001",
         "max_tokens": 500,
-        "system": ANSWER_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": build_answer_user_message(query, block)}],
+        "system": (
+            "You are a helpful search assistant. Answer the query clearly using "
+            "ONLY the provided passages. Structure your answer as numbered points "
+            "with bold headings. Cite each fact with [1], [2], or [3] after the "
+            "relevant sentence. End with a References section listing sources "
+            "as [1], [2], [3] with their URLs. Do not add external knowledge."
+        ),
+        "messages": [{"role": "user", "content": f"Query: {query}\n\nPassages:\n{block}"}],
     }).encode()
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -287,10 +290,8 @@ def generate_answer(query, top_passages, passages, metadata, api_key):
 # Load pipeline
 # ---------------------------------------------------------------
 pipelines, passages, metadata, embeddings, error = load_pipeline()
-
-# Layer 2 instance — picks MMR if embeddings loaded, otherwise Jaccard
-_diversifier = "mmr" if embeddings is not None else "jaccard"
-decision_layer = DecisionLayer(diversifier=_diversifier, enable_telemetry=True)
+# (embeddings load is retained — it'll be used again by Layer 2's MMR diversifier
+# in Phase 7. Until then it's just sitting in memory unused.)
 
 # ---------------------------------------------------------------
 # Header
@@ -326,68 +327,23 @@ with st.form("search_form", clear_on_submit=False):
 # ---------------------------------------------------------------
 # Run search
 # ---------------------------------------------------------------
-if submitted and query is not None:
-    q = (query or "").strip()
+if submitted and query and query.strip():
+    q = query.strip()
 
-    # ── Layer 2a: query validation (cheap pre-flight, before any retrieval) ─
-    rejection = decision_layer.validate_query(q)
-
-    if rejection is not None:
-        # Skip search entirely — query was malformed
-        decision  = rejection
-        best      = []
+    with st.spinner("Searching..."):
         t_results = {}
-    else:
-        with st.spinner("Searching..."):
-            t_results = {}
-            for method, pipeline in pipelines.items():
-                t0 = time.perf_counter()
-                indices, scores = pipeline.search(q)
-                all_results = list(zip(indices, scores))
-                t_results[method] = {
-                    "passages": all_results[:5],   # display slice
-                    "all":      all_results,        # full list for Layer 2
-                    "latency":  (time.perf_counter() - t0) * 1000,
-                }
+        for method, pipeline in pipelines.items():
+            t0 = time.perf_counter()
+            indices, scores = pipeline.search(q)
+            t_results[method] = {
+                "passages": list(zip(indices[:5], scores[:5])),
+                "latency":  (time.perf_counter() - t0) * 1000,
+            }
 
-        # ── Layer 2b: decision logic on retrieval scores ────────────────────
-        decision = decision_layer.decide(
-            query=q,
-            best_results=t_results["Hybrid + Reranker"]["all"],
-            fallback_results={k: v["all"] for k, v in t_results.items() if k != "Hybrid + Reranker"},
-            passages=passages,
-            metadata=metadata,
-            embeddings=embeddings,
-        )
-        best = decision.final_results[:5]
+    best = t_results["Hybrid + Reranker"]["passages"]
 
-    # Confidence badge
-    _conf_meta = {
-        "high":   ("#16a34a", "#f0fdf4", "High confidence"),
-        "medium": ("#2563eb", "#eff6ff", "Medium confidence"),
-        "low":    ("#d97706", "#fffbeb", "Low confidence"),
-        "none":   ("#dc2626", "#fef2f2", "No relevant results"),
-    }
-    conf_color, conf_bg, conf_label = _conf_meta[decision.confidence]
-    st.markdown(
-        f"<div style='display:inline-block;padding:4px 12px;border-radius:20px;"
-        f"background:{conf_bg};color:{conf_color};font-family:DM Mono,monospace;"
-        f"font-size:11px;font-weight:500;letter-spacing:0.06em;text-transform:uppercase;"
-        f"margin:20px 0 8px;'>{conf_label}</div>",
-        unsafe_allow_html=True,
-    )
-
-    if decision.warning:
-        st.markdown(
-            f"<div style='background:#fff8f0;border-left:3px solid #d97706;"
-            f"padding:10px 14px;border-radius:0 8px 8px 0;font-size:13px;"
-            f"color:#92400e;margin-bottom:16px;'>{decision.warning}</div>",
-            unsafe_allow_html=True,
-        )
-    # ── /Layer 2 ─────────────────────────────────────────────────────────────
-
-    # AI Answer — gated by Layer 2 confidence
-    if ANTHROPIC_API_KEY and decision.should_generate_answer:
+    # AI Answer — ungated until Layer 2 is added back
+    if ANTHROPIC_API_KEY:
         with st.spinner("Generating answer..."):
             answer = generate_answer(q, best, passages, metadata, ANTHROPIC_API_KEY)
 
@@ -425,57 +381,52 @@ if submitted and query is not None:
                 )
             st.divider()
 
-    # Top results — only when we have any
-    if best:
-        active_method = decision.fallback_method if decision.fallback_triggered else "Hybrid + Reranker"
-        st.markdown(
-            f"<div style='font-family:DM Mono,monospace;font-size:11px;color:#bbb;"
-            f"letter-spacing:0.06em;text-transform:uppercase;margin:8px 0 14px;'>"
-            f"Top results &nbsp;&middot;&nbsp; {active_method}</div>",
-            unsafe_allow_html=True,
-        )
+    # Top results
+    st.markdown(
+        "<div style='font-family:DM Mono,monospace;font-size:11px;color:#bbb;"
+        "letter-spacing:0.06em;text-transform:uppercase;margin:8px 0 14px;'>"
+        "Top results &nbsp;&middot;&nbsp; Hybrid + Reranker</div>",
+        unsafe_allow_html=True,
+    )
 
-        for rank, (idx, score) in enumerate(best, 1):
-            idx  = int(idx)
-            text = passages[idx]
-            url  = metadata[idx]["url"]
-            rel  = metadata[idx].get("is_selected", 0)
-            tag  = "  [relevant]" if rel else ""
+    for rank, (idx, score) in enumerate(best, 1):
+        idx  = int(idx)
+        text = passages[idx]
+        url  = metadata[idx]["url"]
+        rel  = metadata[idx].get("is_selected", 0)
+        tag  = "  [relevant]" if rel else ""
 
-            with st.expander(f"#{rank} — {text[:90]}...{tag}", expanded=(rank <= 2)):
-                st.write(text)
-                st.markdown(f"[{url}]({url})")
+        with st.expander(f"#{rank} — {text[:90]}...{tag}", expanded=(rank <= 2)):
+            st.write(text)
+            st.markdown(f"[{url}]({url})")
 
-    # Technical comparison — only when we actually ran the search
-    if not t_results:
-        pass  # validation rejected — no comparison to show
-    else:
-        st.divider()
-        with st.expander("Method comparison", expanded=False):
-            st.caption("BM25  ·  Dense  ·  Hybrid RRF  ·  Hybrid + Reranker")
-            colors = {
-                "BM25 only":         "#4a9eff",
-                "Dense only":        "#2dc77a",
-                "Hybrid (RRF)":      "#e3a020",
-                "Hybrid + Reranker": "#9b6dff",
-            }
-            for method, data in t_results.items():
-                color  = colors[method]
-                winner = method == "Hybrid + Reranker"
+    # Technical comparison — hidden
+    st.divider()
+    with st.expander("Method comparison", expanded=False):
+        st.caption("BM25  ·  Dense  ·  Hybrid RRF  ·  Hybrid + Reranker")
+        colors = {
+            "BM25 only":         "#4a9eff",
+            "Dense only":        "#2dc77a",
+            "Hybrid (RRF)":      "#e3a020",
+            "Hybrid + Reranker": "#9b6dff",
+        }
+        for method, data in t_results.items():
+            color  = colors[method]
+            winner = method == "Hybrid + Reranker"
+            st.markdown(
+                f"<span style='font-family:DM Mono,monospace;font-size:12px;"
+                f"color:{color};font-weight:{'600' if winner else '400'};'>"
+                f"{'★ ' if winner else ''}{method}&nbsp;&nbsp;"
+                f"<span style='color:#bbb;font-size:11px;'>{data['latency']:.0f}ms</span>"
+                f"</span>",
+                unsafe_allow_html=True,
+            )
+            for rank, (idx, score) in enumerate(data["passages"], 1):
+                idx = int(idx)
+                rel = metadata[idx].get("is_selected", 0)
                 st.markdown(
-                    f"<span style='font-family:DM Mono,monospace;font-size:12px;"
-                    f"color:{color};font-weight:{'600' if winner else '400'};'>"
-                    f"{'★ ' if winner else ''}{method}&nbsp;&nbsp;"
-                    f"<span style='color:#bbb;font-size:11px;'>{data['latency']:.0f}ms</span>"
-                    f"</span>",
+                    f"&nbsp;&nbsp;`#{rank}` {passages[idx][:100]}..."
+                    f"{'  [relevant]' if rel else ''}",
                     unsafe_allow_html=True,
                 )
-                for rank, (idx, score) in enumerate(data["passages"], 1):
-                    idx = int(idx)
-                    rel = metadata[idx].get("is_selected", 0)
-                    st.markdown(
-                        f"&nbsp;&nbsp;`#{rank}` {passages[idx][:100]}..."
-                        f"{'  [relevant]' if rel else ''}",
-                        unsafe_allow_html=True,
-                    )
-                st.markdown("---")
+            st.markdown("---")

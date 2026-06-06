@@ -1,23 +1,13 @@
 """
 QueryLens — hybrid search with a decision layer.
 
-Public API: import directly from `querylens` for the common types,
-or from `querylens.<module>` for everything else.
-
-Import design
--------------
-Decision-layer types (DecisionLayer, SearchDecision) and the prompts /
-safety modules are imported eagerly — they have no ML dependencies and
-must be importable in test environments without torch / sentence-
-transformers / faiss installed.
-
-Retriever / reranker / data-loader / evaluator types are loaded
-LAZILY via __getattr__ so the package import doesn't drag in heavy
-ML deps. They become available as `querylens.BM25Retriever` etc. only
-when accessed.
+Layer 2 imports (decision module) are eager because they have zero ML
+dependencies. Layer 1 imports (retrievers, reranker, evaluator,
+data_loader) are lazy so that importing this package does not pull in
+torch / sentence-transformers / faiss — critical for tests.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0-phase0"
 
 # Eager — zero ML dependencies
 from querylens.decision import DecisionLayer, SearchDecision
@@ -42,13 +32,9 @@ def __getattr__(name):
         module_path, attr = _LAZY_EXPORTS[name]
         module = importlib.import_module(module_path)
         value = getattr(module, attr)
-        globals()[name] = value      # cache on first access
+        globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = [
-    "DecisionLayer",
-    "SearchDecision",
-    *_LAZY_EXPORTS.keys(),
-]
+__all__ = ["DecisionLayer", "SearchDecision", *_LAZY_EXPORTS.keys()]
